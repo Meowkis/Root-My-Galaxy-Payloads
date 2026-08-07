@@ -30,7 +30,10 @@ static void sigreturn_handler(int sig, siginfo_t *info, void *ucontext)
 {
     (void)sig; (void)info;
     ucontext_t *uc = (ucontext_t *)ucontext;
+    ucontext_t *uc = (ucontext_t *)ucontext;
     mcontext_t *mc = &uc->uc_mcontext;
+    unsigned char *base = (unsigned char *)mc;
+
     unsigned char *base = (unsigned char *)mc;
 
     for (int off = 0; off < 1024; off += 8) {
@@ -75,6 +78,7 @@ void do_sigreturn_fake_lock_route(void)
     sa.sa_sigaction = sigreturn_handler;
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigaction(SIGUSR1, &sa, NULL);
+
 
     usleep(50000);
 
