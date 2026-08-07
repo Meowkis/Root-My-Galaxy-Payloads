@@ -163,7 +163,7 @@ int data_alias_uses_slide = 1;
 #endif
 char ashmem_path[256] = "/dev/ashmem";
 
-static void put_fake_waiter(unsigned char *payload, size_t waiter_off,
+void put_fake_waiter(unsigned char *payload, size_t waiter_off,
                             uintptr_t tree_parent, uintptr_t tree_right,
                             uintptr_t tree_left, uintptr_t pi_parent,
                             uintptr_t pi_right, uintptr_t pi_left,
@@ -408,7 +408,7 @@ void log_startup_context(void) {
              getpid(), getuid(), geteuid(), getgid(), getegid(), attr,
              enforce);
   pr_success("startup limits pid=%d %s\n", getpid(), limits);
-  pr_success("build config pid=%d label=%s slide=pselect main=pselect\n",
+  pr_success("build config pid=%d label=%s slide=pselect main=sigreturn\n",
              getpid(), BUILD_VARIANT_LABEL);
   pr_success("p0 profile pid=%d phys_offset=%016llx kernel_phys_load=%016llx "
              "delta=%016llx slide_logger=%016llx bootid_data=%016llx "
