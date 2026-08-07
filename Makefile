@@ -1,5 +1,5 @@
 API ?= 35
-TARGET ?= pa3q-S938NKSUACZF1
+TARGET ?= dm3q-S918BXXSAFZF5
 OUTDIR ?= build/$(TARGET)
 
 TARGET_HEADER := src/targets/$(TARGET)/target.h
@@ -23,6 +23,7 @@ PRELOAD_SRCS := \
   src/fops.c \
   src/pipe.c \
   src/root.c \
+  src/router.c \
   src/preload.c
 
 APP_PRELOAD_SRCS := \
@@ -32,6 +33,7 @@ APP_PRELOAD_SRCS := \
   src/fops.c \
   src/pipe.c \
   src/root.c \
+  src/router.c \
   src/preload.c
 
 COMMON_CFLAGS := \
