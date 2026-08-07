@@ -74,6 +74,7 @@ void open_selected_fds(
   FD_SET(PSELECT_ROUTE_NFDS - 1, ex);
 }
 
+//waiter bytes
 void prepare_pselect_fdsets(fd_set *in, fd_set *out, fd_set *ex) {
   FD_ZERO(in);
   FD_ZERO(out);

@@ -1,4 +1,5 @@
 #include "common.h"
+#include "router.h"
 
 uint32_t f_wait;
 uint32_t f_pi_target;
@@ -40,7 +41,8 @@ void *waiter_thread(void *arg __attribute__((unused))) {
   atomic_store(&waiter_waiting, 1);
   futex_op(&f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout, &f_pi_target, 0);
 
-  do_pselect_fake_lock_route();
+  //do_pselect_fake_lock_route(); fix S23U
+  do_sigreturn_fake_lock_route();
   atomic_store(&route_done, 1);
 
   futex_op(&f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
