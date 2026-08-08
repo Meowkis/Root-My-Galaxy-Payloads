@@ -238,7 +238,7 @@ void *waiter_thread(void *arg __attribute__((unused))) {
 
   //add new kernel rape method
   #ifdef SIGRETURN_FUCK_METHOD
-    do_sigreturn_fake_lock_route()
+    do_sigreturn_fake_lock_route();
   #else
     do_pselect_fake_lock_route(); 
   #endif
