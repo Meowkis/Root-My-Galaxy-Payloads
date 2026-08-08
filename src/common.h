@@ -10,6 +10,8 @@
 #define KS_PAGE_SIZE 4096
 #define KS_PAGE_MASK 0xfffULL
 
+
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -38,6 +40,8 @@
 #include <unistd.h>
 
 #include "kernelsnitch/utils.h"
+
+
 
 #define KERNEL_PAGE_SETUP_ATTEMPTS 6
 #if defined(APP_PAYLOAD) && APP_PAYLOAD

