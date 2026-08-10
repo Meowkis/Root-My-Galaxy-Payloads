@@ -15,6 +15,7 @@ APP_PRELOAD := $(OUTDIR)/cve-2026-43499-app.so
 APP_RELEASE := $(OUTDIR)/cve-2026-43499-app.release.so
 APP_RELEASE_SIZE := 104128
 ROOT_HELPER := $(OUTDIR)/cve-2026-43499-root
+NATIVE_MCAST_TEST := $(OUTDIR)/test-native-mcast-overlap
 
 PRELOAD_SRCS := \
   src/main.c \
@@ -41,11 +42,13 @@ COMMON_CFLAGS := \
 
 .DEFAULT_GOAL := all
 
-.PHONY: all clean info release
+.PHONY: all clean info release native-mcast-test
 
 all: $(PRELOAD) $(APP_PRELOAD) $(ROOT_HELPER)
 
 release: $(APP_RELEASE)
+
+native-mcast-test: $(NATIVE_MCAST_TEST)
 
 $(OUTDIR):
 	mkdir -p $@
@@ -56,6 +59,9 @@ $(PRELOAD): $(PRELOAD_SRCS) $(TARGET_HEADER) src/offset.h src/common.h src/kerne
 
 $(ROOT_HELPER): src/su_daemon.c | $(OUTDIR)
 	$(TARGET_CC) -fPIE -pie -O2 -g0 -Wall -Wextra $< -ldl -o $@
+
+$(NATIVE_MCAST_TEST): tools/test_native_mcast_overlap.c | $(OUTDIR)
+	$(TARGET_CC) -fPIE -pie -O2 -g0 -Wall -Wextra -pthread $< -o $@
 
 $(APP_PRELOAD): $(APP_PRELOAD_SRCS) $(TARGET_HEADER) src/offset.h src/common.h src/kernelsnitch/*.h | $(OUTDIR)
 	$(TARGET_CC) -DAPP_PAYLOAD=1 -fPIC $(COMMON_CFLAGS) $(APP_PRELOAD_SRCS) \
@@ -79,6 +85,7 @@ info:
 	@echo "APP_PRELOAD=$(APP_PRELOAD)"
 	@echo "APP_RELEASE=$(APP_RELEASE)"
 	@echo "ROOT_HELPER=$(ROOT_HELPER)"
+	@echo "NATIVE_MCAST_TEST=$(NATIVE_MCAST_TEST)"
 
 clean:
 	rm -rf $(OUTDIR)
