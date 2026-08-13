@@ -1,3 +1,6 @@
+# Investigation is closed. Working fork: https://github.com/soumarcelino/Root-My-Galaxy-SM-S918B
+
+
 # Root My Galaxy Payloads
 
 This repository contains the device-specific native side of
